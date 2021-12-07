@@ -39,6 +39,7 @@ include_directories(
 add_library(navigation SHARED
   src/navigation.cpp
   src/astar_planner.cpp
+  src/collision_avoidance.cpp
 )
 
 target_compile_definitions(navigation
