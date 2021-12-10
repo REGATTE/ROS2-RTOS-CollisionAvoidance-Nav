@@ -21,6 +21,7 @@ def generate_launch_description():
 
 
     DRONE_DEVICE_ID=os.getenv('DRONE_DEVICE_ID')
+    FUTURE_TRAJECTORIES_TOPIC="/predicted_trajectories"
 
     namespace=DRONE_DEVICE_ID
     ld.add_action(ComposableNodeContainer(
@@ -37,6 +38,8 @@ def generate_launch_description():
                 parameters=[
                     pkg_share_path + '/config/navigation.yaml',
                     {"use_sim_time": launch.substitutions.LaunchConfiguration("use_sim_time")},
+                    {"uav_name": DRONE_DEVICE_ID}, 
+                    {"trajectory_topic": FUTURE_TRAJECTORIES_TOPIC}, 
                 ],
                 remappings=[
                     ("~/octomap_in", "/" + DRONE_DEVICE_ID + "/octomap_server/octomap_full"),
@@ -55,7 +58,9 @@ def generate_launch_description():
 
                     ("~/status_out", "~/status"),
                     ("~/diagnostics_out", "~/diagnostics"),
-                    ("~/future_trajectory_out", "~/future_trajectory"),
+                    ("~/future_waypoints_out", "~/future_trajectory"),
+                    ("~/future_trajectory_out", FUTURE_TRAJECTORIES_TOPIC),
+                    ("~/trajectory_in", FUTURE_TRAJECTORIES_TOPIC),
 
                     ("~/binary_tree_markers_out", "~/visualization/binary_tree_markers"),
                     ("~/expansion_markers_out", "~/visualization/expansion_markers"),

@@ -1,3 +1,14 @@
+main_update_rate: 10.0 # [Hz] 
+diag_update_rate: 1.0 # [Hz]
+
+collision_avoidance:
+  priority: 1 
+  prediction_horizon: 8
+  height_offset: 1.0 # [m]
+  trajectory_update_rate: 10.0 # [Hz]
+  horizontal_distance_threshold: 1.5 # [m]
+  height_distance_threshold: 1.0 # [m]
+
 planning:
   euclidean_distance_cutoff: 2.0 # [m]
   safe_obstacle_distance: 2.0 # [m]
@@ -16,7 +27,6 @@ planning:
   replanning_limit: 3 # number of repeated attempts
   replanning_distance: 15.0 # [m] Euclidean distance from first waypoint
   override_previous_commands: true # new GOTO will override all previous actions
-  main_update_rate: 10.0 # [Hz] 
 
 visualization:
   visualize_planner: true

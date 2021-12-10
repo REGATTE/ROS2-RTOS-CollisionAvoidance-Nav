@@ -1,6 +1,7 @@
 #include <fog_msgs/srv/path.hpp>
 #include <fog_msgs/srv/vec4.hpp>
 #include <fog_msgs/msg/future_trajectory.hpp>
+#include <fog_msgs/msg/future_waypoints.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <deque>
@@ -34,6 +35,9 @@
 #include <fog_msgs/msg/obstacle_sectors.hpp>
 #include <fog_msgs/srv/waypoint_to_local.hpp>
 #include <fog_msgs/srv/path_to_local.hpp>
+#include <unordered_map>
+
+/* #include "navigation/collision_avoidance.hpp" */
 
 using namespace std::placeholders;
 
@@ -123,13 +127,18 @@ private:
   status_t                         status_          = IDLE;
   waypoint_status_t                waypoint_status_ = EMPTY;
 
+  std::mutex                   waypoints_mutex_;
   std::vector<Eigen::Vector4d> waypoint_out_buffer_;
   std::deque<Eigen::Vector4d>  waypoint_in_buffer_;
   size_t                       current_waypoint_id_;
 
   rclcpp::CallbackGroup::SharedPtr callback_group_;
   rclcpp::TimerBase::SharedPtr     execution_timer_;
+  rclcpp::TimerBase::SharedPtr     diagnostics_timer_;
+  rclcpp::TimerBase::SharedPtr     trajectory_timer_;
   void                             navigationRoutine(void);
+  void                             diagnosticsRoutine(void);
+  void                             futureTrajectoryRoutine(void);
 
   std::unique_ptr<fog_msgs::msg::ObstacleSectors> bumper_msg_;
 
@@ -150,7 +159,9 @@ private:
   double planning_timeout_;
   int    replanning_limit_;
   double replanning_distance_;
-  double main_update_rate_;
+  double _main_update_rate_;
+  double _diag_update_rate_;
+  double _traj_update_rate_;
   bool   bumper_enabled_;
 
   // visualization params
@@ -159,6 +170,23 @@ private:
   double path_points_scale_;
   double goal_points_scale_;
 
+  // collision_avoidance
+  std::mutex mutex_other_uav_trajectories;
+  std::mutex trajectory_mutex_;
+  std::string _uav_name_;
+  std::string _future_trajectories_topic_;
+  int _priority_;
+  size_t _prediction_horizon_;
+  double _height_offset_;
+  double _horizontal_distance_threshold_;
+  double _height_distance_threshold_;
+
+  std::vector<std::string> avoidance_names_;
+  std::vector<Eigen::Vector3d> current_trajectory_;
+  std::unordered_map<std::string, fog_msgs::msg::FutureTrajectory> other_uav_trajectories;
+  bool checkTrajectory(std::vector<Eigen::Vector3d>& waypoints);
+  bool checkCollisions(const Eigen::Vector3d& point_one, const fog_msgs::msg::Vector4Stamped& point_two);
+
   // publishers
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr binary_tree_publisher_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr expansion_publisher_;
@@ -166,7 +194,8 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr goal_publisher_;
 
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr                status_publisher_;
-  rclcpp::Publisher<fog_msgs::msg::FutureTrajectory>::SharedPtr      future_trajectory_publisher_;
+  rclcpp::Publisher<fog_msgs::msg::FutureWaypoints>::SharedPtr       future_waypoints_publisher_;
+  rclcpp::Publisher<fog_msgs::msg::FutureTrajectory>::SharedPtr      future_trajectory_publiser_;
   rclcpp::Publisher<fog_msgs::msg::NavigationDiagnostics>::SharedPtr diagnostics_publisher_;
 
   // subscribers
@@ -176,6 +205,7 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr                        goto_subscriber_;
   rclcpp::Subscription<fog_msgs::msg::ControlInterfaceDiagnostics>::SharedPtr control_diagnostics_subscriber_;
   rclcpp::Subscription<fog_msgs::msg::ObstacleSectors>::SharedPtr             bumper_subscriber_;
+  rclcpp::Subscription<fog_msgs::msg::FutureTrajectory>::SharedPtr            other_uav_trajectory_subscriber_;
 
   // subscriber callbacks
   void octomapCallback(const octomap_msgs::msg::Octomap::UniquePtr msg);
@@ -184,6 +214,7 @@ private:
   void gotoCallback(const nav_msgs::msg::Path::UniquePtr msg);
   void controlDiagnosticsCallback(const fog_msgs::msg::ControlInterfaceDiagnostics::UniquePtr msg);
   void bumperCallback(const fog_msgs::msg::ObstacleSectors::UniquePtr msg);
+  void otherUavTrajectoryCallback(const fog_msgs::msg::FutureTrajectory::SharedPtr msg);
 
   // services provided
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr goto_trigger_service_;
@@ -220,13 +251,15 @@ private:
   void visualizeGoals(const std::deque<Eigen::Vector4d> &waypoints);
 
 
-  std::vector<Eigen::Vector4d> resamplePath(const std::vector<octomap::point3d> &waypoints, const double start_yaw, const double end_yaw);
+ std::vector<Eigen::Vector4d> resamplePath(const std::vector<octomap::point3d> &waypoints, const double start_yaw, const double end_yaw);
+ std::vector<Eigen::Vector3d> parametrizePath (const std::vector<Eigen::Vector4d> &waypoints);
 
   std::shared_ptr<fog_msgs::srv::Path::Request> waypointsToPathSrv(const std::vector<Eigen::Vector4d> &waypoints);
   void                                          hover();
 
   void publishDiagnostics();
-  void publishFutureTrajectory(std::vector<Eigen::Vector4d> waypoints);
+  void publishTrajectory(std::vector<Eigen::Vector3d> waypoints); //TODO: referenece?
+  void publishFutureWaypoints(std::vector<Eigen::Vector4d> waypoints);
 
   // bumper
   bool            bumperCheckObstacles(const fog_msgs::msg::ObstacleSectors &bumper_msg);
@@ -247,6 +280,18 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
   /* parse params from config file //{ */
   RCLCPP_INFO(this->get_logger(), "-------------- Loading parameters --------------");
   bool loaded_successfully = true;
+  loaded_successfully &= parse_param("uav_name", _uav_name_);
+  loaded_successfully &= parse_param("main_update_rate", _main_update_rate_);
+  loaded_successfully &= parse_param("diag_update_rate", _diag_update_rate_);
+  loaded_successfully &= parse_param("trajectory_topic", _future_trajectories_topic_);
+
+  loaded_successfully &= parse_param("collision_avoidance.priority", _priority_);
+  loaded_successfully &= parse_param("collision_avoidance.prediction_horizon", _prediction_horizon_);
+  loaded_successfully &= parse_param("collision_avoidance.height_offset", _height_offset_);
+  loaded_successfully &= parse_param("collision_avoidance.trajectory_update_rate", _traj_update_rate_);
+  loaded_successfully &= parse_param("collision_avoidance.height_distance_threshold", _height_distance_threshold_);
+  loaded_successfully &= parse_param("collision_avoidance.horizontal_distance_threshold", _horizontal_distance_threshold_);
+
   loaded_successfully &= parse_param("planning.euclidean_distance_cutoff", euclidean_distance_cutoff_);
   loaded_successfully &= parse_param("planning.safe_obstacle_distance", safe_obstacle_distance_);
   loaded_successfully &= parse_param("planning.bumper_distance_factor", bumper_distance_factor_);
@@ -264,7 +309,6 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
   loaded_successfully &= parse_param("planning.replanning_limit", replanning_limit_);
   loaded_successfully &= parse_param("planning.replanning_distance", replanning_distance_);
   loaded_successfully &= parse_param("planning.override_previous_commands", override_previous_commands_);
-  loaded_successfully &= parse_param("planning.main_update_rate", main_update_rate_);
 
   loaded_successfully &= parse_param("visualization.visualize_planner", visualize_planner_);
   loaded_successfully &= parse_param("visualization.show_unoccupied", show_unoccupied_);
@@ -296,7 +340,8 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
   path_publisher_              = this->create_publisher<visualization_msgs::msg::Marker>("~/path_markers_out", 1);
   goal_publisher_              = this->create_publisher<visualization_msgs::msg::Marker>("~/goal_markers_out", 1);
   status_publisher_            = this->create_publisher<std_msgs::msg::String>("~/status_out", 1);
-  future_trajectory_publisher_ = this->create_publisher<fog_msgs::msg::FutureTrajectory>("~/future_trajectory_out", 1);
+  future_waypoints_publisher_  = this->create_publisher<fog_msgs::msg::FutureWaypoints>("~/future_waypoints_out", 1);
+  future_trajectory_publiser_  = this->create_publisher<fog_msgs::msg::FutureTrajectory>("~/future_trajectory_out", 1);
   diagnostics_publisher_       = this->create_publisher<fog_msgs::msg::NavigationDiagnostics>("~/diagnostics_out", 5);
 
   // subscribers
@@ -308,6 +353,7 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
       "~/control_diagnostics_in", 1, std::bind(&Navigation::controlDiagnosticsCallback, this, _1));
   octomap_subscriber_ = this->create_subscription<octomap_msgs::msg::Octomap>("~/octomap_in", 1, std::bind(&Navigation::octomapCallback, this, _1), sub_opt);
   bumper_subscriber_  = this->create_subscription<fog_msgs::msg::ObstacleSectors>("~/bumper_in", 1, std::bind(&Navigation::bumperCallback, this, _1), sub_opt);
+  other_uav_trajectory_subscriber_  = this->create_subscription<fog_msgs::msg::FutureTrajectory>("~/trajectory_in", 1, std::bind(&Navigation::otherUavTrajectoryCallback, this, _1));
 
   // clients
   local_path_client_        = this->create_client<fog_msgs::srv::Path>("~/local_path_out");
@@ -324,7 +370,13 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
 
   // timers
   execution_timer_ =
-      this->create_wall_timer(std::chrono::duration<double>(1.0 / main_update_rate_), std::bind(&Navigation::navigationRoutine, this), callback_group_);
+      this->create_wall_timer(std::chrono::duration<double>(1.0 / _main_update_rate_), std::bind(&Navigation::navigationRoutine, this), callback_group_);
+
+  diagnostics_timer_ =
+      this->create_wall_timer(std::chrono::duration<double>(1.0 / _diag_update_rate_), std::bind(&Navigation::diagnosticsRoutine, this), callback_group_);
+
+  trajectory_timer_ =
+      this->create_wall_timer(std::chrono::duration<double>(1.0 / _traj_update_rate_), std::bind(&Navigation::futureTrajectoryRoutine, this), callback_group_);
 
   if (max_waypoint_distance_ <= 0) {
     max_waypoint_distance_ = replanning_distance_;
@@ -812,6 +864,23 @@ bool Navigation::gpsWaypointCallback([[maybe_unused]] const std::shared_ptr<fog_
 }
 //}
 
+/* otherUavTrajectoryCallback //{*/
+void Navigation::otherUavTrajectoryCallback(const fog_msgs::msg::FutureTrajectory::SharedPtr msg){
+
+  auto it = other_uav_trajectories.find(msg->uav_name); 
+  msg->header.stamp = this->get_clock()->now();  //Update stamp
+  
+  // TODO transform each point to common origin
+  
+  if (it == other_uav_trajectories.end()) {
+    avoidance_names_.push_back(msg->uav_name);
+  }
+  other_uav_trajectories[msg->uav_name] = *msg;
+
+  return;
+}
+/*//}*/
+
 /* hoverCallback //{ */
 bool Navigation::hoverCallback([[maybe_unused]] const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                                std::shared_ptr<std_srvs::srv::Trigger::Response>                       response) {
@@ -850,6 +919,7 @@ bool Navigation::hoverCallback([[maybe_unused]] const std::shared_ptr<std_srvs::
   return true;
 }
 //}
+
 
 /* navigationRoutine //{ */
 void Navigation::navigationRoutine(void) {
@@ -896,7 +966,7 @@ void Navigation::navigationRoutine(void) {
 
         std::vector<Eigen::Vector4d> waypoints;
         waypoints.push_back(uav_pos_);
-        publishFutureTrajectory(waypoints);
+        publishFutureWaypoints(waypoints);
         break;
       }
         //}
@@ -1111,7 +1181,7 @@ void Navigation::navigationRoutine(void) {
           RCLCPP_INFO(this->get_logger(), "[%s]:        %.2f, %.2f, %.2f, %.2f", this->get_name(), w.x(), w.y(), w.z(), w.w());
         }
         visualizePath(waypoint_out_buffer_);
-        publishFutureTrajectory(waypoint_out_buffer_);
+        publishFutureWaypoints(waypoint_out_buffer_);
         auto waypoints_srv = waypointsToPathSrv(waypoint_out_buffer_);
         auto call_result   = local_path_client_->async_send_request(waypoints_srv);
         status_            = MOVING;
@@ -1151,7 +1221,7 @@ void Navigation::navigationRoutine(void) {
         }
 
         replanning_counter_ = 0;
-        publishFutureTrajectory(waypoint_out_buffer_);
+        publishFutureWaypoints(waypoint_out_buffer_);
         if ((!control_moving_ && goal_reached_)) {
           RCLCPP_INFO(this->get_logger(), "[%s]: End of current segment reached", this->get_name());
           if (bumper_active_) {
@@ -1220,9 +1290,83 @@ void Navigation::navigationRoutine(void) {
   std_msgs::msg::String msg;
   msg.data = STATUS_STRING[status_];
   status_publisher_->publish(msg);
-  publishDiagnostics();
 }
 //}
+
+/* diagnosticsRoutine //{ */
+void Navigation::diagnosticsRoutine(void) {
+
+  if (!is_initialized_){
+    return;
+  }
+
+  publishDiagnostics();
+
+}
+//}
+
+/* futureTrajectoryRoutine //{ */
+void Navigation::futureTrajectoryRoutine(void) {
+
+  if (is_initialized_ && getting_odometry_ && getting_desired_pose_) {
+
+    // TODO : update waypoints to simply mutex it from here
+    /* parametrizePath(waypoints); */
+    { 
+      std::scoped_lock lock(trajectory_mutex_);
+      publishTrajectory(current_trajectory_);
+    }
+
+  } 
+  return;
+}
+//}
+
+
+/* checkTrajectory //{*/
+bool Navigation::checkTrajectory(std::vector<Eigen::Vector3d>& trajectory){
+
+  if (!is_initialized_){
+      return false;
+  }
+
+  {
+    std::scoped_lock lock(mutex_other_uav_trajectories);
+
+    int size = trajectory.size();
+    auto it = other_uav_trajectories.begin();
+    while (it != other_uav_trajectories.end())
+    {
+        for (int i = 0; i < size; i++)
+        {
+            if (checkCollisions(trajectory[i], it->second.poses[i]))
+            {
+                // collision found, compare priorities, modify
+                if (_priority_ < it->second.priority)
+                {
+                    trajectory[i].z() += _height_offset_;
+                    /* modify = true; */
+                }
+            }
+        }
+    }
+  }
+
+  return true;
+}
+/*//}*/
+
+/* checkCollisions //{*/
+bool Navigation::checkCollisions(const Eigen::Vector3d& one, const fog_msgs::msg::Vector4Stamped& two){
+
+  if (sqrt(one.x() * two.x + one.y() * two.y) < _horizontal_distance_threshold_ || fabs(one.z() - two.z) < _height_distance_threshold_)
+  {
+      return true;
+  }
+  return false;
+}
+/*//}*/
+
 
 /* bumperCheckObstacles //{ */
 bool Navigation::bumperCheckObstacles(const fog_msgs::msg::ObstacleSectors &bumper_msg) {
@@ -1347,6 +1491,70 @@ std::vector<Eigen::Vector4d> Navigation::resamplePath(const std::vector<octomap:
 }
 //}
 
+/* parametrizePath //{ */
+std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen::Vector4d> &waypoints) {
+  std::vector<Eigen::Vector3d> ret;
+  
+  if (waypoints.size() < 2){
+    ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
+    return ret;
+  }
+
+  ret.push_back(Eigen::Vector3d(waypoints[0].x(), waypoints[0].y(), waypoints[0].z()));
+
+  double desired_distance = 1.5*1; //speed*time - TODO: 
+  size_t i = 1; 
+  size_t low = 1;
+  size_t high = 1;
+  while (i < _prediction_horizon_) {
+    Eigen::Vector3d next_point;
+    Eigen::Vector3d direction;
+    double dist = std::sqrt(std::pow(ret.back().x() - waypoints[high].x(), 2) + std::pow(ret.back().y() - waypoints[high].y(), 2) +
+                            std::pow(ret.back().z() - waypoints[high].z(), 2));
+    if (dist < desired_distance) { 
+      direction.x() = waypoints[high].x() - ret.back().x();
+      direction.y() = waypoints[high].y() - ret.back().y();
+      direction.z() = waypoints[high].z() - ret.back().z();
+      direction     = direction.normalized() * desired_distance;
+
+
+      next_point.x() = ret.back().x() + direction.x();
+      next_point.y() = ret.back().y() + direction.y();
+      next_point.z() = ret.back().z() + direction.z();
+    } else {
+      double needed_distance = desired_distance - dist;
+      while (needed_distance > 0 && high < waypoints.size()){
+        high++;
+        double dist = std::sqrt(std::pow(waypoints[low].x() - waypoints[high].x(), 2) + std::pow(waypoints[low].x() - waypoints[high].y(), 2) +
+                                std::pow(waypoints[low].z() - waypoints[high].z(), 2));
+        needed_distance -= dist;
+        low++;
+      }
+        direction.x() = waypoints[high].x() - waypoints[low].x();
+        direction.y() = waypoints[high].y() - waypoints[low].y();
+        direction.z() = waypoints[high].z() - waypoints[low].z();
+        direction     = direction.normalized() * (needed_distance + dist);
+  
+        next_point.x() = waypoints[low].x() + direction.x();
+        next_point.y() = waypoints[low].y() + direction.y();
+        next_point.z() = waypoints[low].z() + direction.z();
+    }
+
+    if (i != 1){
+      i++;
+      if(high >= waypoints.size()){
+        ret.push_back(Eigen::Vector3d(waypoints[high].x(), waypoints[high].y(), waypoints[high].z()));
+      }else{
+        ret.push_back(next_point);
+      }
+    }else{
+      ret[0] = next_point;  
+    }
+  }
+  return ret;
+}
+//}
+
 /* waypointsToPathSrv //{ */
 std::shared_ptr<fog_msgs::srv::Path::Request> Navigation::waypointsToPathSrv(const std::vector<Eigen::Vector4d> &waypoints) {
   nav_msgs::msg::Path msg;
@@ -1391,13 +1599,41 @@ void Navigation::publishDiagnostics() {
   msg.last_nav_goal[0]        = last_goal_.x();
   msg.last_nav_goal[1]        = last_goal_.y();
   msg.last_nav_goal[2]        = last_goal_.z();
+  msg.active_uavs             = avoidance_names_;
   diagnostics_publisher_->publish(msg);
 }
 //}
 
-/* publishFutureTrajectory //{ */
-void Navigation::publishFutureTrajectory(std::vector<Eigen::Vector4d> waypoints) {
+/* publishTrajectory //{ */
+void Navigation::publishTrajectory(std::vector<Eigen::Vector3d> waypoints) {
   fog_msgs::msg::FutureTrajectory msg;
+  msg.header.stamp            = this->get_clock()->now();
+  msg.header.frame_id         = parent_frame_;
+  msg.uav_name = _uav_name_;
+  msg.priority = _priority_;
+  msg.header.stamp    = this->get_clock()->now();
+  msg.header.frame_id = parent_frame_;
+  for (const auto &w : waypoints) {
+    fog_msgs::msg::Vector4Stamped v;
+    v.x               = w.x();
+    v.y               = w.y();
+    v.z               = w.z();
+    v.w               = 0;
+    v.header.frame_id = parent_frame_;
+    msg.poses.push_back(v);
+  }
+  future_trajectory_publiser_->publish(msg);
+}
+//}
+
+/* publishFutureWaypoints //{ */
+void Navigation::publishFutureWaypoints(std::vector<Eigen::Vector4d> waypoints) {
+  { //TODO: remove this part
+    std::scoped_lock lock(trajectory_mutex_);
+    current_trajectory_ = this->parametrizePath(waypoints);
+  }
+
+  fog_msgs::msg::FutureWaypoints msg;
   msg.header.stamp    = this->get_clock()->now();
   msg.header.frame_id = parent_frame_;
   for (const auto &w : waypoints) {
@@ -1409,7 +1645,7 @@ void Navigation::publishFutureTrajectory(std::vector<Eigen::Vector4d> waypoints)
     v.header.frame_id = parent_frame_;
     msg.poses.push_back(v);
   }
-  future_trajectory_publisher_->publish(msg);
+  future_waypoints_publisher_->publish(msg);
 }
 //}
 
@@ -1693,6 +1929,8 @@ bool Navigation::parse_param(const std::string &param_name, T &param_dest) {
   }
   return true;
 }
+
+/*//} */
 
 }  // namespace navigation
 #include <rclcpp_components/register_node_macro.hpp>

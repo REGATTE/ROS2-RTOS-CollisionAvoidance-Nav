@@ -4,15 +4,22 @@
 #include <rclcpp/rclcpp.hpp>
 #include <vector>
 #include <mutex>
+#include <map>
+#include <eigen3/Eigen/Dense>
+#include <fog_msgs/msg/future_trajectory.hpp>
+#include <fog_msgs/msg/navigation_diagnostics.hpp>
+
 /* #include <fog_msgs/FutureTrajectory.hpp> */
+using namespace std::placeholders;
 
 namespace navigation
 {
 
-class CollisionAvoidance {
+class CollisionAvoidance : public rclcpp::Node {
 
 public:
-  CollisionAvoidance(std::string uav_name, std::string trajectory_topic, int priority, double offset_height, double horizontal_distance_threshold, double height_distance_threshold);
+  CollisionAvoidance();
+  CollisionAvoidance(std::string uav_name, std::string trajectory_topic, int priority, double horizontal_distance_threshold, double height_distance_threshold);
   /* bool checkTrajectory(std::vector<Eigen::Vector4d>& waypoints); */
   virtual ~CollisionAvoidance(){};
   
@@ -28,15 +35,15 @@ private:
   std::mutex mutex_other_uav_trajectories;
   std::mutex mutex_other_uav_diagnostics;
 
-  /* std::map<std::string, std::vector<fog_msgs::msg::Vector4Stamped>> other_uav_trajectory; */
-  /* std::map<std::string, fog_msgs::msg::NavigationDiagnostics> other_uav_diagnostics; */
-  /* rclcpp::Subscription<fog_msgs::msg::FutureTrajectory>::UniquePtr other_uav_trajectory_subscriber_; */
-  /* std::vector<rclcpp::Subscription<fog_msgs::msg::FutureTrajectory>::SharedPtr> other_uav_trajectory_subscribers_; */
-  /* std::vector<rclcpp::Subscription<fog_msgs::msg::NavigationDiagnostics>::SharedPtr> other_uav_diag_subscribers_; */
+  std::map<std::string, fog_msgs::msg::NavigationDiagnostics> other_uav_diagnostics;
+  std::map<std::string, std::vector<fog_msgs::msg::Vector4Stamped>> other_uav_trajectory;
+  rclcpp::Subscription<fog_msgs::msg::FutureTrajectory>::SharedPtr other_uav_trajectory_subscriber_;
+  std::vector<rclcpp::Subscription<fog_msgs::msg::FutureTrajectory>::SharedPtr> other_uav_trajectory_subscribers_;
+  std::vector<rclcpp::Subscription<fog_msgs::msg::NavigationDiagnostics>::SharedPtr> other_uav_diag_subscribers_;
 
-  /* bool checkCollisions(const Eigen::Vector4d& point_one, const fog_msgs::msg::Vector4Stamped& point_two); */
-  /* void otherUavTracjectoryCallback(const fog_msgs::msg::FutureTrajectory::SharedPtr msg); */
-  /* void otherUavDiagnosticsCallback(const fog_msgs::msg::NavigationDiagnostics::SharedPtr msg); */
+  bool checkCollisions(const Eigen::Vector4d& point_one, const fog_msgs::msg::Vector4Stamped& point_two);
+  void otherUavTrajectoryCallback(const fog_msgs::msg::FutureTrajectory::SharedPtr msg);
+  void otherUavDiagnosticsCallback(const fog_msgs::msg::NavigationDiagnostics::SharedPtr msg);
 
 };
 
