@@ -257,8 +257,8 @@ private:
   void                                          hover();
 
   void publishDiagnostics();
-  void publishTrajectory(std::vector<Eigen::Vector3d> waypoints); //TODO: referenece?
-  void publishFutureWaypoints(std::vector<Eigen::Vector4d> waypoints);
+  void publishTrajectory(const std::vector<Eigen::Vector3d>& waypoints); 
+  void publishFutureWaypoints(const std::vector<Eigen::Vector4d>& waypoints);
 
   // bumper
   bool            bumperCheckObstacles(const fog_msgs::msg::ObstacleSectors &bumper_msg);
@@ -1286,11 +1286,11 @@ void Navigation::navigationRoutine(void) {
   std_msgs::msg::String msg;
   msg.data = STATUS_STRING[status_];
   status_publisher_->publish(msg);
-  publishDiagnostics();
+  this->publishDiagnostics();
 
   {
     std::scoped_lock lock(trajectory_mutex_);
-    current_trajectory_ = parametrizePath(waypoint_out_buffer_);
+    current_trajectory_ = this->parametrizePath(waypoint_out_buffer_);
   }
 }
 //}
@@ -1304,7 +1304,7 @@ void Navigation::futureTrajectoryRoutine(void) {
     /* parametrizePath(waypoints); */
     { 
       std::scoped_lock lock(trajectory_mutex_);
-      publishTrajectory(current_trajectory_);
+      this->publishTrajectory(current_trajectory_);
     }
 
   } 
@@ -1602,7 +1602,7 @@ void Navigation::publishDiagnostics() {
 //}
 
 /* publishTrajectory //{ */
-void Navigation::publishTrajectory(std::vector<Eigen::Vector3d> waypoints) {
+void Navigation::publishTrajectory(const std::vector<Eigen::Vector3d>& waypoints) {
   fog_msgs::msg::FutureTrajectory msg;
   msg.header.stamp            = this->get_clock()->now();
   msg.header.frame_id         = parent_frame_;
@@ -1624,11 +1624,7 @@ void Navigation::publishTrajectory(std::vector<Eigen::Vector3d> waypoints) {
 //}
 
 /* publishFutureWaypoints //{ */
-void Navigation::publishFutureWaypoints(std::vector<Eigen::Vector4d> waypoints) {
-  /* { //TODO: remove this part */
-  /*   std::scoped_lock lock(trajectory_mutex_); */
-  /*   current_trajectory_ = this->parametrizePath(waypoints); */
-  /* } */
+void Navigation::publishFutureWaypoints(const std::vector<Eigen::Vector4d>& waypoints) {
 
   fog_msgs::msg::FutureWaypoints msg;
   msg.header.stamp    = this->get_clock()->now();
