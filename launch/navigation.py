@@ -61,6 +61,7 @@ def generate_launch_description():
                     ("~/future_waypoints_out", "~/future_trajectory"),
                     ("~/future_trajectory_out", FUTURE_TRAJECTORIES_TOPIC),
                     ("~/trajectory_in", FUTURE_TRAJECTORIES_TOPIC),
+                    ("~/trajectory_out", "~/trajectory_debugging"),
 
                     ("~/binary_tree_markers_out", "~/visualization/binary_tree_markers"),
                     ("~/expansion_markers_out", "~/visualization/expansion_markers"),

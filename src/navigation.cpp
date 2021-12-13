@@ -4,6 +4,8 @@
 #include <fog_msgs/msg/future_waypoints.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
+#include <geometry_msgs/msg/pose.hpp>
 #include <deque>
 #include <future>
 #include <mutex>
@@ -118,6 +120,7 @@ private:
   bool hover_requested_ = false;
 
   Eigen::Vector4d                  uav_pos_;
+  std::mutex                       uav_pos_mutex_;
   Eigen::Vector4d                  desired_pose_;
   Eigen::Vector4d                  current_goal_;
   Eigen::Vector4d                  last_goal_;
@@ -196,6 +199,7 @@ private:
   rclcpp::Publisher<fog_msgs::msg::FutureWaypoints>::SharedPtr       future_waypoints_publisher_;
   rclcpp::Publisher<fog_msgs::msg::FutureTrajectory>::SharedPtr      future_trajectory_publiser_;
   rclcpp::Publisher<fog_msgs::msg::NavigationDiagnostics>::SharedPtr diagnostics_publisher_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr        trajectory_publisher_;
 
   // subscribers
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr                 octomap_subscriber_;
@@ -247,6 +251,7 @@ private:
   void visualizeExpansions(const std::unordered_set<navigation::Node, HashFunction> open, const std::unordered_set<navigation::Node, HashFunction> &closed,
                            const octomap::OcTree &tree);
   void visualizePath(const std::vector<Eigen::Vector4d> &waypoints);
+  void visualizeTrajectory(const std::vector<Eigen::Vector3d> &waypoints);
   void visualizeGoals(const std::deque<Eigen::Vector4d> &waypoints);
 
 
@@ -342,6 +347,7 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
   future_waypoints_publisher_  = this->create_publisher<fog_msgs::msg::FutureWaypoints>("~/future_waypoints_out", 1);
   future_trajectory_publiser_  = this->create_publisher<fog_msgs::msg::FutureTrajectory>("~/future_trajectory_out", 1);
   diagnostics_publisher_       = this->create_publisher<fog_msgs::msg::NavigationDiagnostics>("~/diagnostics_out", 5);
+  trajectory_publisher_        = this->create_publisher<geometry_msgs::msg::PoseArray>("~/trajectory_out", 1);
 
   // subscribers
   odometry_subscriber_ = this->create_subscription<nav_msgs::msg::Odometry>("~/odometry_in", 1, std::bind(&Navigation::odometryCallback, this, _1));
@@ -409,10 +415,13 @@ void Navigation::odometryCallback(const nav_msgs::msg::Odometry::UniquePtr msg) 
 
   getting_odometry_ = true;
   RCLCPP_INFO_ONCE(this->get_logger(), "[%s]: Getting odometry", this->get_name());
-  uav_pos_[0] = msg->pose.pose.position.x;
-  uav_pos_[1] = msg->pose.pose.position.y;
-  uav_pos_[2] = msg->pose.pose.position.z;
-  uav_pos_[3] = getYaw(msg->pose.pose.orientation);
+  {
+    std::scoped_lock lock(uav_pos_mutex_);
+    uav_pos_[0] = msg->pose.pose.position.x;
+    uav_pos_[1] = msg->pose.pose.position.y;
+    uav_pos_[2] = msg->pose.pose.position.z;
+    uav_pos_[3] = getYaw(msg->pose.pose.orientation);
+  }
 }
 //}
 
@@ -1304,6 +1313,7 @@ void Navigation::futureTrajectoryRoutine(void) {
     /* parametrizePath(waypoints); */
     { 
       std::scoped_lock lock(trajectory_mutex_);
+      this->visualizeTrajectory(current_trajectory_);
       this->publishTrajectory(current_trajectory_);
     }
 
@@ -1838,7 +1848,10 @@ void Navigation::visualizePath(const std::vector<Eigen::Vector4d> &waypoints) {
   msg.scale.x            = path_points_scale_;
 
   std::vector<Eigen::Vector4d> tmp_waypoints;
-  tmp_waypoints.push_back(uav_pos_);
+  {
+    std::scoped_lock lock(uav_pos_mutex_);
+    tmp_waypoints.push_back(uav_pos_);
+  }
   for (auto &w : waypoints) {
     tmp_waypoints.push_back(w);
   }
@@ -1852,13 +1865,33 @@ void Navigation::visualizePath(const std::vector<Eigen::Vector4d> &waypoints) {
     p2.x = tmp_waypoints[i].x();
     p2.y = tmp_waypoints[i].y();
     p2.z = tmp_waypoints[i].z();
-    c    = generateColor(0.1, double(i) / double(tmp_waypoints.size()), 0.1, 1);
+    c    = this->generateColor(0.1, double(i) / double(tmp_waypoints.size()), 0.1, 1);
     msg.points.push_back(p1);
     msg.points.push_back(p2);
     msg.colors.push_back(c);
     msg.colors.push_back(c);
   }
   path_publisher_->publish(msg);
+}
+//}
+
+/* visualizeTrajectory //{ */
+void Navigation::visualizeTrajectory(const std::vector<Eigen::Vector3d> &trajectory) {
+  RCLCPP_INFO_ONCE(this->get_logger(), "[%s]: Visualizing trajectory", this->get_name());
+  geometry_msgs::msg::PoseArray msg;
+  msg.header.frame_id    = parent_frame_;
+  msg.header.stamp       = this->get_clock()->now();
+
+  geometry_msgs::msg::Pose p;
+
+  for (auto point:trajectory) {
+    p.position.x = point.x();
+    p.position.y = point.y();
+    p.position.z = point.z();
+    msg.poses.push_back(p);
+  }
+
+  trajectory_publisher_->publish(msg);
 }
 //}
 
