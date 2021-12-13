@@ -165,6 +165,7 @@ private:
   double _diag_update_rate_;
   double _traj_update_rate_;
   bool   bumper_enabled_;
+  double offset_id_;
 
   // visualization params
   double tree_points_scale_;
@@ -254,9 +255,8 @@ private:
   void visualizeTrajectory(const std::vector<Eigen::Vector3d> &waypoints);
   void visualizeGoals(const std::deque<Eigen::Vector4d> &waypoints);
 
-
- std::vector<Eigen::Vector4d> resamplePath(const std::vector<octomap::point3d> &waypoints, const double start_yaw, const double end_yaw);
- std::vector<Eigen::Vector3d> parametrizePath (const std::vector<Eigen::Vector4d> &waypoints);
+  std::vector<Eigen::Vector4d> resamplePath(const std::vector<octomap::point3d> &waypoints, const double start_yaw, const double end_yaw);
+  std::vector<Eigen::Vector3d> parametrizePath (const std::vector<Eigen::Vector4d> &waypoints);
 
   std::shared_ptr<fog_msgs::srv::Path::Request> waypointsToPathSrv(const std::vector<Eigen::Vector4d> &waypoints);
   void                                          hover();
@@ -273,6 +273,9 @@ private:
 
   template <class T>
   bool parse_param(const std::string &param_name, T &param_dest);
+
+  template <class T, class U>
+  double get3Ddistance( T& point_one, U& point_two);
 };
 //}
 
@@ -331,6 +334,7 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
   }
   //}
 
+  offset_id_ = 0;
   current_waypoint_id_ = 0;
   bumper_msg_.reset();
 
@@ -1429,8 +1433,7 @@ std::vector<Eigen::Vector4d> Navigation::resamplePath(const std::vector<octomap:
 
   size_t i = 1;
   while (i < waypoints.size()) {
-    double dist = std::sqrt(std::pow(ret.back().x() - waypoints[i].x(), 2) + std::pow(ret.back().y() - waypoints[i].y(), 2) +
-                            std::pow(ret.back().z() - waypoints[i].z(), 2));
+    double dist = this->get3Ddistance(ret.back(), waypoints[i]);
     if (dist > max_waypoint_distance_) {
       Eigen::Vector3d direction;
       direction.x() = waypoints[i].x() - ret.back().x();
@@ -1497,24 +1500,30 @@ std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen
   
   double num_of_waypoints = waypoints.size();
 
-  if (num_of_waypoints < 2){
-    for (size_t i = 0; i < _prediction_horizon_; i++) {
-      ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
+  {
+    std::scoped_lock lock(uav_pos_mutex_);
+    if (num_of_waypoints < 2){
+      for (size_t i = 0; i < _prediction_horizon_; i++) {
+        ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
+      }
+      offset_id_ = 0;
+      return ret;
     }
-    return ret;
+    ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
+    if(this->get3Ddistance(uav_pos_, waypoints[offset_id_]) < 0.5 && offset_id_ + 1 < num_of_waypoints){ //TODO: add parameter
+      offset_id_++;
+    }
   }
 
-  ret.push_back(Eigen::Vector3d(waypoints[0].x(), waypoints[0].y(), waypoints[0].z()));
 
-  double desired_distance = 1.5*1; //speed*time - TODO: 
+  double desired_distance = 0.5*1; //speed*time - TODO: 
   size_t i = 1; 
-  size_t low = 1;
-  size_t high = 1;
+  size_t high = offset_id_;
+  size_t low = high - 1;
   while (i < _prediction_horizon_) {
     Eigen::Vector3d next_point;
     Eigen::Vector3d direction;
-    double dist = std::sqrt(std::pow(ret.back().x() - waypoints[high].x(), 2) + std::pow(ret.back().y() - waypoints[high].y(), 2) +
-                            std::pow(ret.back().z() - waypoints[high].z(), 2));
+    double dist = this->get3Ddistance(ret.back(), waypoints[high]);
     if (dist >= desired_distance) { 
 
       direction.x() = waypoints[high].x() - ret.back().x();
@@ -1530,8 +1539,7 @@ std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen
       double rdistance = desired_distance - dist;
       while (++high < waypoints.size()){
         low++;
-        double dist = std::sqrt(std::pow(waypoints[low].x() - waypoints[high].x(), 2) + std::pow(waypoints[low].y() - waypoints[high].y(), 2) +
-                                std::pow(waypoints[low].z() - waypoints[high].z(), 2));
+        double dist = this->get3Ddistance(waypoints[low], waypoints[high]);
         if (rdistance - dist <= 0.0)
           break;
 
@@ -1884,7 +1892,7 @@ void Navigation::visualizeTrajectory(const std::vector<Eigen::Vector3d> &traject
 
   geometry_msgs::msg::Pose p;
 
-  for (auto point:trajectory) {
+  for (auto& point:trajectory) {
     p.position.x = point.x();
     p.position.y = point.y();
     p.position.z = point.z();
@@ -1942,6 +1950,13 @@ std_msgs::msg::ColorRGBA Navigation::generateColor(const double r, const double 
 //}
 
 //}
+
+/* get3Ddistance//{*/
+template <class T, class U>
+double Navigation::get3Ddistance( T &point_one, U &point_two){
+  return std::sqrt(std::pow(point_one.x() - point_two.x(), 2) + std::pow(point_one.y() - point_two.y(), 2) + std::pow(point_one.z() - point_two.z(), 2));
+}
+/*//}*/
 
 /* parse_param //{ */
 template <class T>
