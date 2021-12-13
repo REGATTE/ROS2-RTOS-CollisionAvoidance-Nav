@@ -134,7 +134,6 @@ private:
 
   rclcpp::CallbackGroup::SharedPtr callback_group_;
   rclcpp::TimerBase::SharedPtr     execution_timer_;
-  rclcpp::TimerBase::SharedPtr     diagnostics_timer_;
   rclcpp::TimerBase::SharedPtr     trajectory_timer_;
   void                             navigationRoutine(void);
   void                             diagnosticsRoutine(void);
@@ -371,9 +370,6 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
   // timers
   execution_timer_ =
       this->create_wall_timer(std::chrono::duration<double>(1.0 / _main_update_rate_), std::bind(&Navigation::navigationRoutine, this), callback_group_);
-
-  diagnostics_timer_ =
-      this->create_wall_timer(std::chrono::duration<double>(1.0 / _diag_update_rate_), std::bind(&Navigation::diagnosticsRoutine, this), callback_group_);
 
   trajectory_timer_ =
       this->create_wall_timer(std::chrono::duration<double>(1.0 / _traj_update_rate_), std::bind(&Navigation::futureTrajectoryRoutine, this), callback_group_);
@@ -1290,18 +1286,12 @@ void Navigation::navigationRoutine(void) {
   std_msgs::msg::String msg;
   msg.data = STATUS_STRING[status_];
   status_publisher_->publish(msg);
-}
-//}
-
-/* diagnosticsRoutine //{ */
-void Navigation::diagnosticsRoutine(void) {
-
-  if (!is_initialized_){
-    return;
-  }
-
   publishDiagnostics();
 
+  {
+    std::scoped_lock lock(trajectory_mutex_);
+    current_trajectory_ = parametrizePath(waypoint_out_buffer_);
+  }
 }
 //}
 
@@ -1495,8 +1485,12 @@ std::vector<Eigen::Vector4d> Navigation::resamplePath(const std::vector<octomap:
 std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen::Vector4d> &waypoints) {
   std::vector<Eigen::Vector3d> ret;
   
-  if (waypoints.size() < 2){
-    ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
+  double num_of_waypoints = waypoints.size();
+
+  if (num_of_waypoints < 2){
+    for (size_t i = 0; i < _prediction_horizon_; i++) {
+      ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
+    }
     return ret;
   }
 
@@ -1511,45 +1505,48 @@ std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen
     Eigen::Vector3d direction;
     double dist = std::sqrt(std::pow(ret.back().x() - waypoints[high].x(), 2) + std::pow(ret.back().y() - waypoints[high].y(), 2) +
                             std::pow(ret.back().z() - waypoints[high].z(), 2));
-    if (dist < desired_distance) { 
+    if (dist >= desired_distance) { 
+
       direction.x() = waypoints[high].x() - ret.back().x();
       direction.y() = waypoints[high].y() - ret.back().y();
       direction.z() = waypoints[high].z() - ret.back().z();
-      direction     = direction.normalized() * desired_distance;
-
+      direction = direction.normalized() * desired_distance;
 
       next_point.x() = ret.back().x() + direction.x();
       next_point.y() = ret.back().y() + direction.y();
       next_point.z() = ret.back().z() + direction.z();
+
     } else {
-      double needed_distance = desired_distance - dist;
-      while (needed_distance > 0 && high < waypoints.size()){
-        high++;
-        double dist = std::sqrt(std::pow(waypoints[low].x() - waypoints[high].x(), 2) + std::pow(waypoints[low].x() - waypoints[high].y(), 2) +
-                                std::pow(waypoints[low].z() - waypoints[high].z(), 2));
-        needed_distance -= dist;
+      double rdistance = desired_distance - dist;
+      while (++high < waypoints.size()){
         low++;
+        double dist = std::sqrt(std::pow(waypoints[low].x() - waypoints[high].x(), 2) + std::pow(waypoints[low].y() - waypoints[high].y(), 2) +
+                                std::pow(waypoints[low].z() - waypoints[high].z(), 2));
+        if (rdistance - dist <= 0.0)
+          break;
+
+        rdistance -= dist;
       }
-        direction.x() = waypoints[high].x() - waypoints[low].x();
-        direction.y() = waypoints[high].y() - waypoints[low].y();
-        direction.z() = waypoints[high].z() - waypoints[low].z();
-        direction     = direction.normalized() * (needed_distance + dist);
-  
-        next_point.x() = waypoints[low].x() + direction.x();
-        next_point.y() = waypoints[low].y() + direction.y();
-        next_point.z() = waypoints[low].z() + direction.z();
+      direction.x() = waypoints[high].x() - waypoints[low].x();
+      direction.y() = waypoints[high].y() - waypoints[low].y();
+      direction.z() = waypoints[high].z() - waypoints[low].z();
+      direction     = direction.normalized() * rdistance;
+
+      next_point.x() = waypoints[low].x() + direction.x();
+      next_point.y() = waypoints[low].y() + direction.y();
+      next_point.z() = waypoints[low].z() + direction.z();
     }
 
-    if (i != 1){
-      i++;
-      if(high >= waypoints.size()){
-        ret.push_back(Eigen::Vector3d(waypoints[high].x(), waypoints[high].y(), waypoints[high].z()));
+    if (i > 0){
+      if(high >= num_of_waypoints){
+        ret.push_back(Eigen::Vector3d(waypoints.back().x(), waypoints.back().y(), waypoints.back().z()));
       }else{
         ret.push_back(next_point);
       }
     }else{
       ret[0] = next_point;  
     }
+    i++;
   }
   return ret;
 }
@@ -1628,10 +1625,10 @@ void Navigation::publishTrajectory(std::vector<Eigen::Vector3d> waypoints) {
 
 /* publishFutureWaypoints //{ */
 void Navigation::publishFutureWaypoints(std::vector<Eigen::Vector4d> waypoints) {
-  { //TODO: remove this part
-    std::scoped_lock lock(trajectory_mutex_);
-    current_trajectory_ = this->parametrizePath(waypoints);
-  }
+  /* { //TODO: remove this part */
+  /*   std::scoped_lock lock(trajectory_mutex_); */
+  /*   current_trajectory_ = this->parametrizePath(waypoints); */
+  /* } */
 
   fog_msgs::msg::FutureWaypoints msg;
   msg.header.stamp    = this->get_clock()->now();
