@@ -166,6 +166,7 @@ private:
   double _traj_update_rate_;
   bool   bumper_enabled_;
   double offset_id_;
+  double px4_target_velocity_;
 
   // visualization params
   double tree_points_scale_;
@@ -179,10 +180,12 @@ private:
   std::string _uav_name_;
   std::string _future_trajectories_topic_;
   int _priority_;
-  size_t _prediction_horizon_;
+  size_t _prediction_len_;
+  double _time_prediction_horizon_;
   double _height_offset_;
   double _horizontal_distance_threshold_;
   double _height_distance_threshold_;
+  double prediction_time_sample_;
 
   std::vector<std::string> avoidance_names_;
   std::vector<Eigen::Vector3d> current_trajectory_;
@@ -293,7 +296,8 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
   loaded_successfully &= parse_param("trajectory_topic", _future_trajectories_topic_);
 
   loaded_successfully &= parse_param("collision_avoidance.priority", _priority_);
-  loaded_successfully &= parse_param("collision_avoidance.prediction_horizon", _prediction_horizon_);
+  loaded_successfully &= parse_param("collision_avoidance.prediction_len", _prediction_len_);
+  loaded_successfully &= parse_param("collision_avoidance.prediction_time_horizon",  _time_prediction_horizon_);
   loaded_successfully &= parse_param("collision_avoidance.height_offset", _height_offset_);
   loaded_successfully &= parse_param("collision_avoidance.trajectory_update_rate", _traj_update_rate_);
   loaded_successfully &= parse_param("collision_avoidance.height_distance_threshold", _height_distance_threshold_);
@@ -337,6 +341,8 @@ Navigation::Navigation(rclcpp::NodeOptions options) : Node("navigation", options
   offset_id_ = 0;
   current_waypoint_id_ = 0;
   bumper_msg_.reset();
+  
+  prediction_time_sample_ = _prediction_len_ / _time_prediction_horizon_;
 
   callback_group_        = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   auto sub_opt           = rclcpp::SubscriptionOptions();
@@ -455,6 +461,7 @@ void Navigation::controlDiagnosticsCallback(const fog_msgs::msg::ControlInterfac
   goal_reached_   = msg->mission_finished;
   manual_control_ = msg->manual_control;
   airborne_       = msg->airborne;
+  px4_target_velocity_ = msg->px4_target_velocity;
 }
 //}
 
@@ -1498,29 +1505,28 @@ std::vector<Eigen::Vector4d> Navigation::resamplePath(const std::vector<octomap:
 std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen::Vector4d> &waypoints) {
   std::vector<Eigen::Vector3d> ret;
   
-  double num_of_waypoints = waypoints.size();
+  size_t num_of_waypoints = waypoints.size();
 
   {
     std::scoped_lock lock(uav_pos_mutex_);
     if (num_of_waypoints < 2){
-      for (size_t i = 0; i < _prediction_horizon_; i++) {
+      for (size_t i = 0; i < _prediction_len_; i++) {
         ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
       }
       offset_id_ = 0;
       return ret;
     }
     ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
-    if(this->get3Ddistance(uav_pos_, waypoints[offset_id_]) < 0.5 && offset_id_ + 1 < num_of_waypoints){ //TODO: add parameter
+    if(this->get3Ddistance(uav_pos_, waypoints[offset_id_]) < 0.2 && offset_id_ + 1 < num_of_waypoints){ //TODO: add parameter
       offset_id_++;
     }
   }
 
-
-  double desired_distance = 0.5*1; //speed*time - TODO: 
-  size_t i = 1; 
+  double desired_distance = px4_target_velocity_*prediction_time_sample_; 
+  size_t i = 0; 
   size_t high = offset_id_;
   size_t low = high - 1;
-  while (i < _prediction_horizon_) {
+  while (i < _prediction_len_) {
     Eigen::Vector3d next_point;
     Eigen::Vector3d direction;
     double dist = this->get3Ddistance(ret.back(), waypoints[high]);

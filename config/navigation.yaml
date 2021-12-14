@@ -3,7 +3,9 @@ diag_update_rate: 1.0 # [Hz]
 
 collision_avoidance:
   priority: 1 
-  prediction_horizon: 8
+  trajectory_timeout: 1.0 # [s]
+  prediction_len: 10 # points
+  prediction_time_horizon: 8.0 # [s]
   height_offset: 1.0 # [m]
   trajectory_update_rate: 10.0 # [Hz]
   horizontal_distance_threshold: 1.5 # [m]
