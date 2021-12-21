@@ -167,6 +167,7 @@ private:
   bool   bumper_enabled_;
   double offset_id_;
   double px4_target_velocity_;
+  size_t current_waypoint_;
 
   // visualization params
   double tree_points_scale_;
@@ -462,6 +463,7 @@ void Navigation::controlDiagnosticsCallback(const fog_msgs::msg::ControlInterfac
   manual_control_ = msg->manual_control;
   airborne_       = msg->airborne;
   px4_target_velocity_ = msg->px4_target_velocity;
+  current_waypoint_ = msg->current_waypoint_id;
 }
 //}
 
@@ -1348,6 +1350,8 @@ bool Navigation::checkTrajectory(std::vector<Eigen::Vector3d>& trajectory){
     auto it = other_uav_trajectories.begin();
     while (it != other_uav_trajectories.end())
     {
+      if(it->second.uav_name != _uav_name_){ 
+        //TODO: add timestamp check
         for (int i = 0; i < size; i++)
         {
             if (checkCollisions(trajectory[i], it->second.poses[i]))
@@ -1360,6 +1364,7 @@ bool Navigation::checkTrajectory(std::vector<Eigen::Vector3d>& trajectory){
                 }
             }
         }
+      }
     }
   }
 
@@ -1503,29 +1508,28 @@ std::vector<Eigen::Vector4d> Navigation::resamplePath(const std::vector<octomap:
 
 /* parametrizePath //{ */
 std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen::Vector4d> &waypoints) {
+
+  RCLCPP_INFO(this->get_logger(), "starting new replanning");
   std::vector<Eigen::Vector3d> ret;
   
   size_t num_of_waypoints = waypoints.size();
 
   {
     std::scoped_lock lock(uav_pos_mutex_);
-    if (num_of_waypoints < 2){
+    if (num_of_waypoints < 1){
       for (size_t i = 0; i < _prediction_len_; i++) {
         ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
       }
-      offset_id_ = 0;
       return ret;
     }
     ret.push_back(Eigen::Vector3d(uav_pos_.x(), uav_pos_.y(), uav_pos_.z()));
-    if(this->get3Ddistance(uav_pos_, waypoints[offset_id_]) < 0.2 && offset_id_ + 1 < num_of_waypoints){ //TODO: add parameter
-      offset_id_++;
-    }
   }
 
   double desired_distance = px4_target_velocity_*prediction_time_sample_; 
   size_t i = 0; 
-  size_t high = offset_id_;
+  size_t high = current_waypoint_;
   size_t low = high - 1;
+  RCLCPP_INFO(this->get_logger(), "num of waypoints: %d , current id: %d", num_of_waypoints, current_waypoint_);
   while (i < _prediction_len_) {
     Eigen::Vector3d next_point;
     Eigen::Vector3d direction;
@@ -1543,7 +1547,7 @@ std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen
 
     } else {
       double rdistance = desired_distance - dist;
-      while (++high < waypoints.size()){
+      while (++high < num_of_waypoints){
         low++;
         double dist = this->get3Ddistance(waypoints[low], waypoints[high]);
         if (rdistance - dist <= 0.0)
@@ -1561,15 +1565,16 @@ std::vector<Eigen::Vector3d> Navigation::parametrizePath(const std::vector<Eigen
       next_point.z() = waypoints[low].z() + direction.z();
     }
 
-    if (i > 0){
-      if(high >= num_of_waypoints){
-        ret.push_back(Eigen::Vector3d(waypoints.back().x(), waypoints.back().y(), waypoints.back().z()));
-      }else{
-        ret.push_back(next_point);
-      }
-    }else{
-      ret[0] = next_point;  
+    if (high >= num_of_waypoints){
+      next_point = Eigen::Vector3d(waypoints.back().x(), waypoints.back().y(), waypoints.back().z());
     }
+
+    if (i == 0){
+      ret[0] = next_point;  
+    }else{
+      ret.push_back(next_point);
+    }
+
     i++;
   }
   return ret;
